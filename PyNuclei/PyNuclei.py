@@ -75,8 +75,6 @@ class Nuclei:
             ports = list(self.active_metric_ports.keys())
             for port in ports:
                 if not self.active_metric_ports[port]:
-                    if DEBUG:
-                        print(f"Not monitoring metrics port: {port}")
                     continue
 
                 if DEBUG:
@@ -129,7 +127,13 @@ class Nuclei:
                 progress_values[port]["max"] = json_object["total"]
                 progress_values[port]["current"] = json_object["requests"]
 
-            self.max_progress = 0
+            # Since we moved to a queue, we need to make the max_progress reflect
+            #  those nuclei that didn't start, we will assume each has 10 tests to
+            #  run so that we don't reach 100% before all the nuclei are done
+            # How many nuclei we sill need to run
+            nuclei_left = max_metrics_ports - len(progress_values)
+            self.max_progress = nuclei_left * 10
+
             self.current_progress = 0
             self.eta = datetime.timedelta(seconds=0)
             self.findings = 0
@@ -188,10 +192,12 @@ class Nuclei:
         """Launch the nuclei process and output the outcome if 'verbose'"""
         while True:
             try:
-                (host, metrics_port, command, verbose) = self.queue.get()
+                (host, metrics_port, command, verbose) = self.queue.get(timeout=1)
             except queue.Empty:
-                # No more items
-                break
+                if DEBUG:
+                    print("No more scan commands in queue")
+
+                return
 
             self.active_metric_ports[metrics_port] = True
             process = subprocess.Popen(
@@ -204,6 +210,8 @@ class Nuclei:
             if verbose:
                 print(f"[Stdout] [{host}] {output.decode('utf-8', 'ignore')}")
                 print(f"[Stderr] [{host}] {error.decode('utf-8', 'ignore')}")
+
+            self.queue.task_done()
 
     @staticmethod
     def is_nuclei_installed(nuclei_path=None):
@@ -572,6 +580,7 @@ class Nuclei:
             t.start()
 
         self.queue.join()
+
         for thread in threads:
             thread.join()
 
