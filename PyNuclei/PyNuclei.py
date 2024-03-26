@@ -96,6 +96,7 @@ class Nuclei:
                         f"http://127.0.0.1:{port}/metrics", timeout=1
                     )
                 except requests.ConnectionError as _:
+                    self.active_metric_ports[port] = False
                     self.done += 1
                     if port in progress_values and "max" in progress_values[port]:
                         progress_values[port]["done"] = True
@@ -180,7 +181,6 @@ class Nuclei:
             self.processes.append(process)
 
             output, error = process.communicate()
-            self.active_metric_ports[metrics_port] = False
 
             if verbose:
                 print(f"[Stdout] [{host}] {output.decode('utf-8', 'ignore')}")
