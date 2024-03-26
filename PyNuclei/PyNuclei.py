@@ -17,6 +17,7 @@ import yaml
 from .ScanUtils.UserAgents import USER_AGENTS
 
 FILE_SEPARATOR = "#SEP#"
+DEBUG = False
 
 
 class NucleiNotFound(Exception):
@@ -40,16 +41,10 @@ class Nuclei:
         self.selected_templates_count = 0
         self.processes = []
         self.findings = 0
+        self.max_threads = 3  # maximum number of instances to run at the same time
 
-        # Allow defining of less than maximum amount of threads running
-        # we run one thread per template (by default), this can put a strain
-        # on the system
-        self.max_threads = 3
-
-        # Keep track of which metric ports are active
         self.active_metric_ports = {}
 
-        # Hold a queue for scanning threads
         self.queue = queue.Queue()
 
         # Allow changing the path where nuclei is installed (instead of expecting it to be in $PATH)
@@ -65,7 +60,7 @@ class Nuclei:
         except FileExistsError:
             pass
 
-    def metrics_thread(self):
+    def metrics_thread(self, max_metrics_ports):
         """Connect to the /metrics backend and make stats from it"""
 
         # Wait until we see at least one running before exiting
@@ -76,11 +71,16 @@ class Nuclei:
 
         while True:
             self.running = 0
-            self.done = 0
 
-            for port in self.active_metric_ports.keys():
+            ports = list(self.active_metric_ports.keys())
+            for port in ports:
                 if not self.active_metric_ports[port]:
+                    if DEBUG:
+                        print(f"Not monitoring metrics port: {port}")
                     continue
+
+                if DEBUG:
+                    print(f"Monitoring metrics port: {port}")
 
                 if port not in progress_values:
                     progress_values[port] = {}
@@ -90,15 +90,23 @@ class Nuclei:
                     progress_values[port]["current"] = 0
                     progress_values[port]["matched"] = 0
                     progress_values[port]["eta"] = datetime.timedelta(seconds=0)
+                    progress_values[port]["retry_count"] = 0
 
                 try:
                     response = requests.get(
                         f"http://127.0.0.1:{port}/metrics", timeout=1
                     )
                 except requests.ConnectionError as _:
-                    self.active_metric_ports[port] = False
-                    self.done += 1
+                    if progress_values[port]["retry_count"] < 5:
+                        progress_values[port]["retry_count"] += 1
+                        if DEBUG:
+                            print(
+                                f"{port} found to be closed, will retry #{progress_values[port]['retry_count']}"
+                            )
+                        continue
+
                     if port in progress_values and "max" in progress_values[port]:
+                        self.active_metric_ports[port] = False
                         progress_values[port]["done"] = True
                         progress_values[port]["current"] = progress_values[port]["max"]
 
@@ -113,7 +121,7 @@ class Nuclei:
                     self.running += 1
                     wait_for_running = False
                 except Exception as _:
-                    self.done += 1
+                    self.active_metric_ports[port] = False
                     continue
 
                 progress_values[port]["matched"] = json_object["matched"]
@@ -148,15 +156,28 @@ class Nuclei:
                     else:
                         item["eta"] = datetime.timedelta(seconds=0)
 
+            done_count = 0
+            for port in self.active_metric_ports:
+                if not self.active_metric_ports[port]:
+                    done_count += 1
+
+            self.done = done_count
+
             if (
                 self.running == 0
-                and self.done == (len(self.active_metric_ports) - 9092)
+                and done_count == (max_metrics_ports - 9092)
                 and not wait_for_running
             ):
                 # No more running processes
                 break
 
+            if DEBUG:
+                print(f"{self.max_progress=} {self.current_progress=} {self.findings=}")
+
             time.sleep(1)  # Sleep for 1sec
+
+        if DEBUG:
+            print("metrics_thread is done")
 
     def stop(self):
         """Allow stopping of nuclei processes"""
@@ -165,8 +186,6 @@ class Nuclei:
 
     def scanning_thread(self):
         """Launch the nuclei process and output the outcome if 'verbose'"""
-        # cmdline = " ".join(command)
-        # print(f"[nuclei] Running: '{cmdline}'")
         while True:
             try:
                 (host, metrics_port, command, verbose) = self.queue.get()
@@ -201,15 +220,47 @@ class Nuclei:
         """
         Checks if the PyNuclei module was run for the first time - if yes, update the templates
         """
-        with open(
-            f"{os.path.dirname(__file__)}/.config", "r+", encoding="latin1"
-        ) as py_nuclei_config:
-            config_details = json.loads(py_nuclei_config.read())
-            if config_details["FIRST_RUN"]:
-                print("Configuring PyNuclei for First Run...")
+        nuclei_config_filename = f"{os.path.dirname(__file__)}/.config"
+        with open(nuclei_config_filename, "r+", encoding="latin1") as py_nuclei_config:
+            config_details = {}
+            try:
+                config_details = json.loads(py_nuclei_config.read())
+            except Exception:
+                print(f"Malformed nuclei config file: {nuclei_config_filename}")
+
+            run_update = False
+            if (
+                "FIRST_RUN" not in config_details
+                or config_details["FIRST_RUN"]
+                or "LAST_RUN" not in config_details
+            ):
+                print("Running nuclei update")
+                run_update = True
+
+            if "LAST_RUN" in config_details:
+                try:
+                    elapsed: datetime.timedelta = (
+                        datetime.datetime.now()
+                        - datetime.datetime.strptime(
+                            config_details["LAST_RUN"], "%y-%m-%d"
+                        )
+                    )
+                    if elapsed.days > 7:
+                        print(f"Running nuclei update as {elapsed} has passed")
+                        run_update = True
+                except Exception:
+                    print("Running nuclei update")
+                    run_update = True
+
+            if run_update:
                 Nuclei.update_nuclei(nuclei_path=nuclei_path)
 
                 config_details["FIRST_RUN"] = False
+                # Keep record of when we last run, try to update once a week
+                config_details["LAST_RUN"] = datetime.datetime.strftime(
+                    datetime.datetime.now(), "%y-%m-%d"
+                )
+
                 py_nuclei_config.seek(0)
                 py_nuclei_config.truncate()
                 py_nuclei_config.write(json.dumps(config_details))
@@ -477,11 +528,6 @@ class Nuclei:
             threads.append(t)
             t.start()
 
-        if metrics:
-            t = threading.Thread(target=self.metrics_thread)
-            threads.append(t)
-            t.start()
-
         for template in templates:
             if not user_agent:
                 user_agent = random.choice(USER_AGENTS)
@@ -517,7 +563,13 @@ class Nuclei:
                 command.append("1")  # Update very 1 second
                 metrics_port += 1
 
+            # commands.append(command)
             self.queue.put([host, metrics_port, command, self.verbose])
+
+        if metrics:
+            t = threading.Thread(target=self.metrics_thread, args=[metrics_port])
+            threads.append(t)
+            t.start()
 
         self.queue.join()
         for thread in threads:
