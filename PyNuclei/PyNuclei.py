@@ -5,7 +5,10 @@ import subprocess
 import os
 import shutil
 import tempfile
-from threading import Thread
+
+import queue
+import threading
+
 import time
 import datetime
 import requests
@@ -38,6 +41,17 @@ class Nuclei:
         self.processes = []
         self.findings = 0
 
+        # Allow defining of less than maximum amount of threads running
+        # we run one thread per template (by default), this can put a strain
+        # on the system
+        self.max_threads = 3
+
+        # Keep track of which metric ports are active
+        self.active_metric_ports = {}
+
+        # Hold a queue for scanning threads
+        self.queue = queue.Queue()
+
         # Allow changing the path where nuclei is installed (instead of expecting it to be in $PATH)
         # Check if the '/' is at the end - and remove it if "yes"
         if nuclei_path is not None and nuclei_path[-1] == "/":
@@ -51,7 +65,7 @@ class Nuclei:
         except FileExistsError:
             pass
 
-    def metrics_thread(self, max_metrics_port):
+    def metrics_thread(self):
         """Connect to the /metrics backend and make stats from it"""
 
         # Wait until we see at least one running before exiting
@@ -64,7 +78,10 @@ class Nuclei:
             self.running = 0
             self.done = 0
 
-            for port in range(9092, max_metrics_port):
+            for port in self.active_metric_ports.keys():
+                if not self.active_metric_ports[port]:
+                    continue
+
                 if port not in progress_values:
                     progress_values[port] = {}
                     progress_values[port]["done"] = False
@@ -132,7 +149,7 @@ class Nuclei:
 
             if (
                 self.running == 0
-                and self.done == (max_metrics_port - 9092)
+                and self.done == (len(self.active_metric_ports) - 9092)
                 and not wait_for_running
             ):
                 # No more running processes
@@ -145,17 +162,29 @@ class Nuclei:
         for process in self.processes:
             process.send_signal(2)  # SIGINT
 
-    def scanning_thread(self, host, command, verbose):
+    def scanning_thread(self):
         """Launch the nuclei process and output the outcome if 'verbose'"""
-        process = subprocess.Popen(
-            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-        )
-        self.processes.append(process)
+        # cmdline = " ".join(command)
+        # print(f"[nuclei] Running: '{cmdline}'")
+        while True:
+            try:
+                (host, metrics_port, command, verbose) = self.queue.get()
+            except queue.Empty:
+                # No more items
+                break
 
-        output, error = process.communicate()
-        if verbose:
-            print(f"[Stdout] [{host}] {output.decode('utf-8', 'ignore')}")
-            print(f"[Stderr] [{host}] {error.decode('utf-8', 'ignore')}")
+            self.active_metric_ports[metrics_port] = True
+            process = subprocess.Popen(
+                command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            self.processes.append(process)
+
+            output, error = process.communicate()
+            self.active_metric_ports[metrics_port] = False
+
+            if verbose:
+                print(f"[Stdout] [{host}] {output.decode('utf-8', 'ignore')}")
+                print(f"[Stderr] [{host}] {error.decode('utf-8', 'ignore')}")
 
     @staticmethod
     def is_nuclei_installed(nuclei_path=None):
@@ -440,9 +469,19 @@ class Nuclei:
             templates = self.nuclei_templates
 
         self.selected_templates_count = len(templates)
-
-        commands = []
         metrics_port = 9092
+
+        threads = []
+        for _ in range(self.max_threads):
+            t = threading.Thread(target=self.scanning_thread)
+            threads.append(t)
+            t.start()
+
+        if metrics:
+            t = threading.Thread(target=self.metrics_thread)
+            threads.append(t)
+            t.start()
+
         for template in templates:
             if not user_agent:
                 user_agent = random.choice(USER_AGENTS)
@@ -478,19 +517,9 @@ class Nuclei:
                 command.append("1")  # Update very 1 second
                 metrics_port += 1
 
-            commands.append(command)
+            self.queue.put([host, metrics_port, command, self.verbose])
 
-        threads = []
-        for command in commands:
-            t = Thread(target=self.scanning_thread, args=[host, command, self.verbose])
-            threads.append(t)
-            t.start()
-
-        if metrics:
-            t = Thread(target=self.metrics_thread, args=[metrics_port])
-            threads.append(t)
-            t.start()
-
+        self.queue.join()
         for thread in threads:
             thread.join()
 
