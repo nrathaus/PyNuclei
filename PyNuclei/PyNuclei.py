@@ -131,7 +131,7 @@ class Nuclei:
             #  those nuclei that didn't start, we will assume each has 10 tests to
             #  run so that we don't reach 100% before all the nuclei are done
             # How many nuclei we sill need to run
-            nuclei_left = max_metrics_ports - len(progress_values)
+            nuclei_left = (max_metrics_ports - 9092) - len(progress_values)
             self.max_progress = nuclei_left * 10
 
             self.current_progress = 0
