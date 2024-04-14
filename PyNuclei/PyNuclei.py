@@ -344,6 +344,75 @@ class Nuclei:
         except FileExistsError:
             pass
 
+    def return_templates_details_v2(self):
+        """
+        Process the templates available and return them as a structure
+        WARNING: This is a VERY time consuming function
+        """
+        nuclei_binary = "nuclei"
+        if self.nuclei_path:
+            nuclei_binary = f"{self.nuclei_path}/nuclei"
+
+        # Get path of templates
+        command = [nuclei_binary, "-no-color", "-templates-version"]
+        process = subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+
+        # The output is inside error
+        _, error = process.communicate()
+        error = error.decode()
+
+        if "nuclei-templates version" not in error:
+            raise ValueError("Nuclei didn't return the expected output")
+
+        if error.find("(") == -1 or error.find(")") == -1:
+            raise ValueError("Nuclei didn't return the expected output")
+
+        templates_path = error[error.find("(") + 1 : error.find(")")]
+        print(f"{templates_path=}")
+
+        # Get a list of templates
+        command = [nuclei_binary, "-no-color", "-tl"]
+
+        process = subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+
+        output, error = process.communicate()
+        output = output.decode()
+
+        templates = []
+
+        # Remove \r in case its there
+        output = output.replace("\r", "")
+        lines = output.split("\n")
+        count = 0
+
+        for line in lines:
+            if line == "":
+                continue
+
+            count += 1
+            if count % 100 == 0:
+                print(f"Progress: {count / len(lines) * 100.0:.2f}%")
+
+            template_filename = f"{templates_path}/{line}"
+
+            # print(f"Opening {template_filename}")
+            with open(template_filename, "r", encoding="utf-8") as file_handle:
+                template_obj = yaml.safe_load(file_handle)
+
+                keys = list(template_obj.keys())
+                for key in keys:
+                    # Keep only the info we want
+                    if key not in ["Template", "id", "info"]:
+                        del template_obj[key]
+
+                templates.append(template_obj)
+
+        return templates
+
     def return_templates_details(self):
         """
         Process the templates available and return them as a structure
