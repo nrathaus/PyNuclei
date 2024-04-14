@@ -99,7 +99,8 @@ class Nuclei:
                         progress_values[port]["retry_count"] += 1
                         if DEBUG:
                             print(
-                                f"{port} found to be closed, will retry #{progress_values[port]['retry_count']}"
+                                f"{port} found to be closed, will retry "
+                                f"#{progress_values[port]['retry_count']}"
                             )
                         continue
 
