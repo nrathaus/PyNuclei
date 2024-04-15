@@ -344,22 +344,19 @@ class Nuclei:
         except FileExistsError:
             pass
 
-    def return_templates_details(self):
+    def return_templates_details(self, limit=None):
         """
         Process the templates available and return them as a structure
         WARNING: This is a VERY time consuming function
+        
+        limit - limit how many templates are pulled, used mainly for testing
         """
         nuclei_binary = "nuclei"
         if self.nuclei_path:
             nuclei_binary = f"{self.nuclei_path}/nuclei"
-
+        
         # Get path of templates
-        command = [
-            nuclei_binary,
-            "-disable-update-check",
-            "-no-color",
-            "-templates-version",
-        ]
+        command = [nuclei_binary, "-disable-update-check", "-no-color", "-templates-version"]
         process = subprocess.Popen(
             command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
         )
@@ -374,8 +371,7 @@ class Nuclei:
         if error.find("(") == -1 or error.find(")") == -1:
             raise ValueError("Nuclei didn't return the expected output")
 
-        templates_path = error[error.find("(") + 1 : error.find(")")]
-        print(f"{templates_path=}")
+        templates_path = error[error.find("(")+1:error.find(")")]
 
         # Get a list of templates
         command = [nuclei_binary, "-disable-update-check", "-no-color", "-tl"]
@@ -399,8 +395,12 @@ class Nuclei:
                 continue
 
             count += 1
+            if limit is not None:
+                if count > limit:
+                    break
+
             if count % 100 == 0:
-                print(f"Progress: {count / len(lines) * 100.0:.2f}%")
+                print(f"[nuclei] template processing progress: {count / len(lines) * 100.0:.2f}%")
 
             template_filename = f"{templates_path}/{line}"
 
