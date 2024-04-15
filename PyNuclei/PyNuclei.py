@@ -354,7 +354,12 @@ class Nuclei:
             nuclei_binary = f"{self.nuclei_path}/nuclei"
 
         # Get path of templates
-        command = [nuclei_binary, "-no-color", "-templates-version"]
+        command = [
+            nuclei_binary,
+            "-disable-update-check",
+            "-no-color",
+            "-templates-version",
+        ]
         process = subprocess.Popen(
             command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
         )
@@ -373,7 +378,7 @@ class Nuclei:
         print(f"{templates_path=}")
 
         # Get a list of templates
-        command = [nuclei_binary, "-no-color", "-tl"]
+        command = [nuclei_binary, "-disable-update-check", "-no-color", "-tl"]
 
         process = subprocess.Popen(
             command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
